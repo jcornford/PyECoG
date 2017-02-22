@@ -157,7 +157,8 @@ class NdfFile:
                 self.tid_set.add(tid)
                 self.tid_raw_data_time_dict[tid]  = {}
                 self.tid_data_time_dict[tid] = {}
-        logging.info(self.filepath +' valid ids and freq are: '+str(self.tid_to_fs_dict))
+        logging.info(self.filepath)
+        logging.info('Valid ids and freq are: '+str(self.tid_to_fs_dict))
 
     #@lprofile()
     def glitch_removal(self, plot_glitches=False, print_output=False,
@@ -302,11 +303,16 @@ class NdfFile:
 
         for tid in self.read_ids:
             max_interp = max(np.diff(self.tid_data_time_dict[tid]['time']))
+            diff_array = np.diff(self.tid_data_time_dict[tid]['time'])
+            second_gaps = diff_array[diff_array>1]
+            seconds_missing = np.sum(second_gaps)
+            n_second_gaps   = second_gaps.shape[0]
+            if n_second_gaps >0:
+                logging.debug('Tid '+str(tid)+': File contained '+ str(n_second_gaps)+' gaps of >1 second. Total Missing: '+str(seconds_missing)+ ' s.')
             try:
                 assert max_interp < 2.0
             except:
-                logging.warning('WARNING: You interpolated for greater than two seconds! ('+ str('{first:.2f}'.format(first = max_interp))+' sec)')
-                logging.warning('File was '+str(os.path.split(self.filepath)[1])+ ', transmitter id was '+ str(tid))
+                logging.warning(str(os.path.split(self.filepath)[1])+ ' Tid '+str(tid)+': You interpolated (at least once) for greater than two seconds! ('+ str('{first:.2f}'.format(first = max_interp))+' sec)')
 
             # do linear interpolation between the points, where !nan
             regularised_time = np.linspace(0, 3600.0, num= 3600 * self.tid_to_fs_dict[tid])
@@ -348,6 +354,7 @@ class NdfFile:
                                                  data=self.tid_data_time_dict[tid]['data'],
                                                  compression = "gzip", dtype='f4',
                                                  chunks = self.tid_data_time_dict[tid]['data'].shape)
+                # todo WHY ARE YOU SAVING TIME?!!!! Just generate it when you load up h5
                 transmitter_group.create_dataset('time',
                                                  data=self.tid_data_time_dict[tid]['time'],
                                                  compression = "gzip", dtype='f4',
@@ -372,7 +379,7 @@ class NdfFile:
              auto_glitch_removal = True,
              auto_resampling = True,
              auto_filter = True,
-             scale_and_filter = False):
+             scale_to_mode_std = False):
         '''
         N.B. Should run glitch removal before high pass filtering and auto resampling... If unhappy with glitches,
         turn off filtering and the resampling and then run their methods etc.
@@ -382,7 +389,7 @@ class NdfFile:
             auto_glitch_removal: to automatically detect glitches with default tactic median abs deviation
             auto_resampling: to resample fs to regular sampling frequency
             auto_filter : high pass filter traces at default 1 hz
-            scale_and_filter: high pass filter (default 1 hz) and scale to mode std dev 5 second blocks of trace
+            scale_to_mode_std: high pass filter (default 1 hz) and scale to mode std dev 5 second blocks of trace
             WARNING: This is more for visualisation of what the feature extractor is working on. TO keep things
             simple, when saving HDF5 files, save non-scaled.
 
@@ -403,14 +410,14 @@ class NdfFile:
         f = open(self.filepath, 'rb')
         f.seek(self.data_address)
 
-        # read everything in 8bits, grabs time stamps, then get_file props has already read these ids
+        # read everything in 8bits, grabs time stamps, get_valid_tids_and_fs called on init has already has ids
         self.t_stamps_256 = self._e_bit_reads[3::4]
 
         # read again, but in 16 bit chunks, grab messages
         f.seek(self.data_address + 1)
-        self.voltage_messages = np.fromfile(f, '>u2')[::2]
 
-        self._merge_coarse_and_fine_clocks() # this assigns self.time_array
+        self.voltage_messages = np.fromfile(f, '>u2')[::2]
+        self._merge_coarse_and_fine_clocks() # this generates self.time_array
 
         for read_id in self.read_ids:
             assert read_id in self.tid_set, "Transmitter %i is not a valid transmitter id" % read_id
@@ -427,11 +434,10 @@ class NdfFile:
             self.correct_sampling_frequency()
             # there should now be no nans surviving here!
 
-        if auto_filter and not scale_and_filter:
+        if auto_filter:
             self.highpass_filter()
 
-        if scale_and_filter:
-            self.highpass_filter()
+        if scale_to_mode_std: # not normally called
             self.standardise_to_mode_stddev()
 
 
@@ -447,7 +453,7 @@ class NdfFile:
             nyq = 0.5 * fs
             cutoff_decimal = cutoff_hz/nyq
 
-            logging.debug('Highpassfiltering, tid = '+str(read_id)+' fs: ' + str(fs) + ' at '+ str(cutoff_hz)+ ' Hz')
+            logging.info('Highpassfiltering, tid = '+str(read_id)+' fs: ' + str(fs) + ' at '+ str(cutoff_hz)+ ' Hz')
             data = self.tid_data_time_dict[read_id]['data']
             data = data - np.mean(data)    # remove mean to try and reduce any filtering artifacts
             b, a = signal.butter(2, cutoff_decimal, 'highpass', analog=False)
@@ -468,7 +474,7 @@ class NdfFile:
             fs = self.tid_to_fs_dict[read_id]
             data = self.tid_data_time_dict[read_id]['data']
 
-            logging.debug('Standardising to mode std dev, tid = '+str(read_id))
+            logging.info('Standardising to mode std dev, tid = '+str(read_id))
 
             reshaped = np.reshape(data, (int(3600/stdtw), int(stdtw*fs)))
             #std_vector = self.round_to_sigfigs(np.std(reshaped, axis = 1), sigfigs=std_sigfigs)

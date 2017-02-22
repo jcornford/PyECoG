@@ -62,15 +62,77 @@ apply_async_with_callback()
         self.parallel_savedir = None
         self.parrallel_flag_pred = False
 
-
-    def add_features_seizure_library(self, libary_path, overwrite = False, run_peaks = True):
+    def add_labels_to_seizure_library(self, library_path, overwrite, timewindow):
         '''
+
+        Called by self.add_features_seizure_library()
+
+        '''
+        logging.info('Adding labels to '+ library_path)
+        # todo check timewindows go into n seconds precisely
+        with h5py.File(library_path, 'r+') as f:
+            seizure_datasets = [f[group] for group in list(f.keys())]
+
+            for i, group in enumerate(seizure_datasets):
+                # First check if there are labels already there. If overwrite, go to except block
+                try:
+                    if not overwrite:
+                        features = group['labels']
+                        logging.info(str(group)+' already has labels, skipping')
+                    if overwrite:
+                        raise
+                except:
+                    try: # attempt to delete, will throw error if group doesn't exist.
+                        del group['labels']
+                        del group.attrs['chunked_annotation']
+
+                        logging.debug('Deleted old labels')
+                    except:
+                        pass
+                    # make labels dataset here:
+                    # first work out the would-be shape of the data array
+                    data = group['data'][:]
+                    fs = group.attrs['fs']
+                    n_traces = int(data.shape[0] / (fs * timewindow))
+                    #dp_lost =  int(data.shape[0] % (fs * timewindow))
+                    # dp per chunk is then int(fs * timewindow))
+                    #print(n_traces)
+                    labels = np.zeros(n_traces)
+                    #print(group.attrs['precise_annotation'])
+                    group.attrs['chunk_length'] = timewindow
+                    for row in group.attrs['precise_annotation']:
+                        start_i = int(np.floor(row[0]/timewindow))
+                        end_i   = int(np.ceil(row[1]/timewindow))
+                        labels[start_i:end_i] = 1
+
+                        try:
+                            group.attrs['chunked_annotation'] = np.vstack([group.attrs['chunked_annotation'],
+                                                                           np.array([(start_i*timewindow,end_i*timewindow)]) ])
+                        except KeyError:
+                            group.attrs['chunked_annotation'] = np.array([(start_i*timewindow,end_i*timewindow)])
+                    ###
+                    #print(group.attrs['chunked_annotation'])
+
+
+                    group.create_dataset('labels', data = labels, compression = "gzip", dtype = 'i2', chunks = labels.shape)
+
+    def add_features_seizure_library(self, library_path, overwrite = False, run_peaks = True, timewindow = 5):
+        '''
+        Inputs:
+        - overwrite: if false, will only add labels and features to seizures in the library that do not already
+          have accompanying labels and features.
+
         This is painfully slow at the moment, not accessing hdf5 groups in parallel.
-
+        Both adding features to library and prediction h5 file now are expecting unchunked data. This method
+        will make labels too though
         '''
-        logging.info('Adding features to '+ libary_path)
+        logging.info('First adding labels to ' + library_path)
+        print('Adding labels first...', end=' ')
+        self.add_labels_to_seizure_library(library_path, overwrite, timewindow)
+        print('Done')
 
-        with h5py.File(libary_path, 'r+') as f:
+        logging.info('Adding features to ' + library_path)
+        with h5py.File(library_path, 'r+') as f:
             seizure_datasets = [f[group] for group in list(f.keys())]
 
             l = len(seizure_datasets)-1
@@ -87,12 +149,13 @@ apply_async_with_callback()
                         raise
                 except:
                     data_array = group['data'][:]
+                    data_array = self._make_array_from_data(data_array, fs = group.attrs['fs'], timewindow = timewindow)
                     assert len(data_array.shape) > 1
 
                     if data_array is not None:
                         extractor = FeatureExtractor(data_array, fs = group.attrs['fs'], run_peakdet = run_peaks)
                         features = extractor.feature_array
-                        try:
+                        try: # attempt to delete, will throw error if group doesn't exist.
                             del group['features']
                             logging.debug('Deleted old features')
                         except:
@@ -170,7 +233,7 @@ apply_async_with_callback()
         self.parrallel_flag_pred = True
         self.run_pkdet = run_peakdet
         self.twindow = timewindow
-        files_to_add_features = [os.path.join(h5py_folder, fname) for fname in os.listdir(h5py_folder) if fname.startswith('M')]
+        files_to_add_features = [os.path.join(h5py_folder, fname) for fname in os.listdir(h5py_folder) if fname.startswith('M')] #switch to self.fullpath_listdir()
         if n_cores == -1:
             n_cores = multiprocessing.cpu_count()
 
@@ -185,7 +248,7 @@ apply_async_with_callback()
         pool.close()
         pool.join()
         self.parrallel_flag_pred = False
-    def _get_annotations_from_df_datadir_matches(self, df, file_dir):
+    def get_annotations_from_df_datadir_matches(self, df, file_dir):
         '''
         This function matches the entries in a dataframe with files in a directory
 
@@ -199,11 +262,13 @@ apply_async_with_callback()
 
         # now loop through matching the tid to datafile in the annotations
         df.columns = [label.lower() for label in df.columns]
+        df.columns  = [label.strip(' ') for label in df.columns]
+
         reference_count = 0
         annotation_dicts = []
         for row in df.iterrows():
             # annotation name is bad, but will ultimately be the library h5 dataset name
-            annotation_name = str(row[1]['name']).split('.')[0]+'_tid_'+str(int(row[1]['transmitter']))
+            annotation_name = str(row[1]['filename']).split('.')[0]+'_tid_'+str(int(row[1]['transmitter']))
             for datafile in data_filenames:
                 if datafile.startswith(annotation_name.split('_')[0]):
                     start = row[1]['start']
@@ -228,7 +293,7 @@ apply_async_with_callback()
         '''
         Args:
 
-            df : pandas dataframe. Column titles need to be "name", "start","end", "transmitter"
+            df : pandas dataframe. Column titles need to be "filename", "start","end", "transmitter"
             file_dir: path to converted h5, or ndf directory, that contains files referenced in
                       the dataframe
             timewindow: size to chunk the data up with
@@ -251,8 +316,11 @@ apply_async_with_callback()
         '''
 
         logging.info('Datahandler - creating SeizureLibrary')
-
-        annotation_dicts = self._get_annotations_from_df_datadir_matches(df, file_dir)
+        try:
+            annotation_dicts = self.get_annotations_from_df_datadir_matches(df, file_dir)
+        except:
+            print("Error getting annotations from your file. Please ensure columns are named: 'filename', 'transmitter','start','end'")
+            annotation_dicts = self.get_annotations_from_df_datadir_matches(df, file_dir)
         # annotations_dicts is a list of dicts with... e.g 'dataset_name': 'M1445443776_tid_9',
         # 'end': 2731.0, 'fname': 'all_ndfs/M1445443776.ndf', 'start': 2688.0,' tid': 9
 
@@ -319,7 +387,7 @@ apply_async_with_callback()
         '''
 
         logging.info('Appending to seizure library')
-        annotation_dicts = self._get_annotations_from_df_datadir_matches(df, file_dir)
+        annotation_dicts = self.get_annotations_from_df_datadir_matches(df, file_dir)
         # annotations_dicts is a list of dicts with... e.g 'dataset_name': 'M1445443776_tid_9',
         # 'end': 2731.0, 'fname': 'all_ndfs/M1445443776.ndf', 'start': 2688.0,' tid': 9
 
@@ -338,36 +406,56 @@ apply_async_with_callback()
                                   verbose = False,
                                   scale_and_filter = False):
 
+
         logging.debug('Adding '+str(annotation['fname']))
         if annotation['fname'].endswith('.ndf'):
             file_obj = NdfFile(annotation['fname'],fs = fs)
-            file_obj.load(annotation['tid'],scale_and_filter= scale_and_filter)
+            file_obj.load(annotation['tid'], scale_to_mode_std= scale_and_filter)
         elif annotation['fname'].endswith('.h5'):
             file_obj = H5File(annotation['fname'])
         else:
             print('ERROR: Unrecognised file-type')
 
         # add in filtering and scaling here
-        data_array = self._make_array_from_data(file_obj[annotation['tid']]['data'], fs, timewindow)
+        #data_array = self._make_array_from_data(file_obj[annotation['tid']]['data'], fs, timewindow)
+        data_array = file_obj[annotation['tid']]['data'] # just 1D at the moment!
 
         # use the start and end times to make labels
-        labels = np.zeros(shape = (data_array.shape[0]))
-        start_i = int(np.floor(annotation['start']/timewindow))
-        end_i   = int(np.ceil(annotation['end']/timewindow))
+        #labels = np.zeros(shape = (data_array.shape[0]))
+        #start_i = int(np.floor(annotation['start']/timewindow))
+        #end_i   = int(np.ceil(annotation['end']/timewindow))
+
+        #print('  ')
+        #print(annotation['start'], ': ', start_i*timewindow)
+        #print(annotation['end'], ':', end_i*timewindow)
 
         with h5py.File(seizure_library_path, 'r+') as f:
             if annotation['dataset_name'] in f.keys():
                 logging.info(str(annotation['dataset_name'])+' has more than one seizure!')
-                labels =  f[annotation['dataset_name']+'/labels']
-                labels[start_i:end_i] = 1
+                #labels =  f[annotation['dataset_name']+'/labels']
+                # todo wrap this in try, not possible to have end earlier than start of the seizure, will throw reverse selection error
+                #labels[start_i:end_i] = 1
+                #print('more than one seizure')
+
+                #f[annotation['dataset_name']].attrs['chunked_annotation'] = np.vstack(
+                #    [f[annotation['dataset_name']].attrs['chunked_annotation'], np.array([(120,160)]) ])
+
+                #print(f[annotation['dataset_name']].attrs['chunked_annotation'])
+                f[annotation['dataset_name']].attrs['precise_annotation'] = np.vstack(
+                    [f[annotation['dataset_name']].attrs['precise_annotation'], np.array([(annotation['start'],annotation['end'])])])
+                #print((f[annotation['dataset_name']].attrs['precise_annotation']))
+                #print(dict(f[annotation['dataset_name']].attrs))
+
             else:
                 group = f.create_group(annotation['dataset_name'])
                 group.attrs['tid'] = annotation['tid']
                 group.attrs['fs']  = fs
                 group.attrs['scaled_and_filtered'] = scale_and_filter
+                #group.attrs['chunked_annotation'] = np.array([(100,160)])
+                group.attrs['precise_annotation'] = np.array([(annotation['start'],annotation['end'])])
                 group.create_dataset('data', data = data_array, compression = "gzip", dtype='f4', chunks = data_array.shape)
-                labels[start_i:end_i] = 1 # indexing is fine, dont need to convert to array
-                group.create_dataset('labels', data = labels, compression = "gzip", dtype = 'i2', chunks = labels.shape)
+                #labels[start_i:end_i] = 1 # indexing is fine, dont need to convert to array
+                #group.create_dataset('labels', data = labels, compression = "gzip", dtype = 'i2', chunks = labels.shape)
             f.close()
 
     @staticmethod
@@ -384,11 +472,11 @@ apply_async_with_callback()
         return data_array
 
     @staticmethod
-    def _fullpath_listdir(d):
+    def fullpath_listdir(d):
+        ''' returns full filepath,  excludes hidden files, starting with .'''
         return [os.path.join(d, f) for f in os.listdir(d) if not f.startswith('.')]
 
-    def convert_ndf_directory_to_h5(self, ndf_dir, tids = 'all', save_dir  = 'same_level', n_cores = -1, fs = 'auto',
-                                    scale_and_filter = False):
+    def convert_ndf_directory_to_h5(self, ndf_dir, tids = 'all', save_dir  = 'same_level', n_cores = -1, fs = 'auto'):
         """
 
         Args:
@@ -401,9 +489,9 @@ apply_async_with_callback()
         ndfs conversion seem to be pretty buggy...
 
         """
-        self.scale_and_filter = scale_and_filter
+
         self.fs_for_parallel_conversion = fs
-        files = [f for f in self._fullpath_listdir(ndf_dir) if f.endswith('.ndf')]
+        files = [f for f in self.fullpath_listdir(ndf_dir) if f.endswith('.ndf')]
 
         # check ids
         ndf = NdfFile(files[0])
@@ -428,17 +516,16 @@ apply_async_with_callback()
         pool = multiprocessing.Pool(n_cores)
         l = len(files)
         self.printProgress(0,l, prefix = 'Progress:', suffix = 'Complete', barLength = 50)
-        for i, _ in enumerate(pool.imap(self._convert_ndf, files), 1):
+        for i, _ in enumerate(pool.imap(self.convert_ndf, files), 1):
             self.printProgress(i,l, prefix = 'Progress:', suffix = 'Complete', barLength = 50)
         pool.close()
         pool.join()
 
-    def _convert_ndf(self,filename):
+    def convert_ndf(self, filename):
 
         savedir = self.savedir_for_parallel_conversion
         tids = self.tids_for_parallel_conversion
         fs = self.fs_for_parallel_conversion
-        scale_and_filter_flag = self.scale_and_filter
 
         # convert m name
         mname = os.path.split(filename)[1]
@@ -449,12 +536,11 @@ apply_async_with_callback()
         try:
             ndf = NdfFile(filename, fs = fs)
             if set(tids).issubset(ndf.tid_set) or tids == 'all':
-                ndf.load(tids, scale_and_filter = scale_and_filter_flag)
-                abs_savename = os.path.join(savedir, filename.split('/')[-1][:-4]+ndf_time+' tids_'+str(tids))
+                ndf.load(tids)
+                abs_savename = os.path.join(savedir, os.path.split(filename)[-1][:-4]+ndf_time+' tids_'+str(tids))
                 ndf.save(save_file_name= abs_savename)
             else:
                 logging.warning('Not all read tids:'+str(tids) +' were valid for '+str(os.path.split(filename)[1])+' skipping!')
-                #print('not all tids:'+str(tids) +' were valid for '+str(os.path.split(filename)[1])+' skipping!')
 
         except Exception:
             print('Something unexpected went wrong loading '+str(tids)+' from '+mname+' :')
