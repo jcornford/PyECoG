@@ -13,7 +13,7 @@ import pickle
 from sklearn.ensemble import RandomForestClassifier
 from sklearn import metrics
 
-from pyecog.visualisation import loading_subwindow, convert_ndf_window, library_subwindow, add_pred_features_subwindow, clf_subwindow
+import loading_subwindow, convert_ndf_window, library_subwindow, add_pred_features_subwindow, clf_subwindow
 from pyecog.ndf.h5loader import H5File
 from pyecog.ndf.datahandler import DataHandler, NdfFile
 from pyecog.ndf.classifier import Classifier
@@ -318,7 +318,7 @@ class TrainClassifierThread(QThread):
         self.clf.rf =  RandomForestClassifier(n_jobs=self.n_cores, n_estimators= self.ntrees, oob_score=True, bootstrap=True)
         self.clf.rf.fit(self.res_x, np.ravel(self.res_y))
         self.update_progress_label.emit('Getting Hidden Markov Model params...')
-        self.clf.make_hmm_model()
+        self.clf.make_hmm_model() # this has default fold arguement of 3
 
         print ('********* oob results on resampled data  - not including HMM *******')
         self.oob_preds = np.round(self.clf.rf.oob_decision_function_[:,1])
@@ -326,6 +326,10 @@ class TrainClassifierThread(QThread):
         print('Recall: '+str(metrics.recall_score(np.ravel(self.res_y), self.oob_preds)))
         print('F1: '+str(metrics.f1_score(np.ravel(self.res_y), self.oob_preds)))
         print(metrics.classification_report(np.ravel(self.res_y),self.oob_preds))
+
+        # would be very nice to emit this back
+        #self.feature_weightings = sorted(zip(self.clf.rf.feature_importances_, self.clf.feature_names),reverse = True)
+
         self.finished.emit()
         self.exit()
 
