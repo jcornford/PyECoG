@@ -1,0 +1,13 @@
+name: pyecog
+dependencies:
+  - python=3.6
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - seaborn
+  - h5py
+  - xlrd
+  - bokeh
+  - pyqtgraph
+  - pomegranate
