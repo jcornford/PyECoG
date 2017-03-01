@@ -9,7 +9,7 @@ dependencies:
   - h5py
   - xlrd
   - bokeh
-  - pyqtgraph
-  - pyqt
   - pip:
+    - pyqt
     - pomegranate
+    - pyqtgraph
