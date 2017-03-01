@@ -8,8 +8,8 @@ Strongly recommended to use python 3.6, untested and likely (more) buggy with 2.
 ### Installing PyECoG
 
 
-1. Install miniconda. Choose the Python 3.6 64-bit version for your operating system (Linux, Windows, or OS X).
-2. Download the [environment file](https://github.com/mikailweston/pyecog/blob/master/environment.yml)
+1. Install Anaconda. Choose the Python 3.6 64-bit version for your operating system (Linux, Windows, or OS X).
+2. Download the [environment file](https://github.com/mikailweston/pyecog/blob/master/environment.yml).
 3. Open a terminal (on Windows, cmd) in the directory where you saved the file and type:
 ```{bash}
 conda env create -n pyecog
